@@ -1,7 +1,9 @@
 #lang turnstile+/quicklang
-(require turnstile+/eval turnstile+/typedefs turnstile+/more-utils)
+(require turnstile+/eval turnstile+/typedefs turnstile+/more-utils
+         syntax/parse
+         (for-syntax rosette/safe))
 
-(provide Π Boolean String Char Number SExp
+(provide Π Refine Boolean String Char Number SExp
          #%datum
 
          [rename-out
@@ -10,44 +12,207 @@
           (lsl-cond      cond)
           (lsl-if        if)
           #;(define-struct define-struct)
-          (plus          +)])
+          (lsl-plus      +)
+          (lsl-<         <)
+          (lsl->         >)
+          (lsl-and       and)
+          (lsl-equal?    equal?)])
 
 
 ;; Types
 (define-type Type : Type)
+
+;; (define-type Condition : Type)
+
 (define-type Number : Type)
+(define-type Unit : Type)
 (define-type Boolean : Type)
 (define-type String : Type)
 (define-type Char : Type)
 (define-type SExp : Type)
 
+(begin-for-syntax
+  (define-syntax ~base-type
+    (pattern-expander
+     (syntax-parser
+       [_ #'(~or ~Number ~Unit ~Boolean ~String ~Char ~SExp)])))
+
+  (define-syntax-class base-type #:description "a base type"
+    (pattern (~and τ (~parse (~base-type)
+                             ((current-type-eval) #'τ))))))
+
+(define-syntax lq-predicate
+  (syntax-parser
+    [(_ ~Number)  number?]
+    #;[(_ ~Unit)    ???]
+    [(_ ~Boolean) boolean?]
+    [(_ ~String)  string?]
+    [(_ ~Char)    char?]
+    #;[(_ ~SExp)    ???]))
+
+#;(define-for-syntax base-type?
+  (λ (τ) (or (Number? τ) (Boolean? τ) (String? τ) (Char? τ) (SExp? τ)))
+  #;(syntax-parser
+    [(_ τ)
+     (syntax-parse ((current-type-eval) #'τ)
+       [~Number #'#t]
+       [_       #'#f])]))
+#;(printf "Number? ~a~n" (base-type? Boolean))
+
 (define-type Π #:with-binders [X : Type] : Type -> Type)
 (define-type Σ #:with-binders [X : Type] : Type -> Type)
-(define-type refine #:with-binders [X : Type] : Boolean -> Type)
 
-(define-typed-syntax plus
+;; Refinement Types
+(struct refine (τ c))
+(define-typed-syntax Refine
+  [(_ [x : τ:base-type] c) ≫
+   [⊢ τ ≫ τ- ⇐ Type]
+   [[x ≫ x- : τ] ⊢ c ≫ c- ⇐ Boolean]
+   -------
+   [⊢ (#%plain-app refine τ- (#%plain-lambda (x-) c-)) ⇒ Type]])
+
+(begin-for-syntax
+  (define refine/internal (expand/df #'refine))
+  (define-syntax ~Refine
+    (pattern-expander
+     (syntax-parser
+       [(_ [x:id (~datum :) τ-base] c)
+        #:with ty-to-match (generate-temporary)
+        #'(~and ty-to-match
+                (~parse
+                 ((~literal #%plain-app)
+                  (~and name/internal:id
+                        (~fail
+                         #:unless (free-id=? #'name/internal refine/internal)
+                         (format "Expected refinement type, got: ~a"
+                                 (resugar-type #'ty-to-match)
+                                 #;(syntax->datum (resugar-type #'ty-to-match)))))
+                  τ-base
+                  ((~literal #%plain-lambda) (x) c))
+                 #'ty-to-match))]))))
+
+#;(define-syntax Prop
+  (syntax-parser
+    [(_ c) #'(Refine [_ : Unit] c)]))
+
+;; Base type values and operations
+(define-typed-syntax unit
+  [_ ≫
+   -------
+   [⊢ #t ⇒ Unit]])
+
+(define-typed-syntax lsl-plus
   [(_ e ...) ≫
    [⊢ e ≫ e- ⇐ Number] ...
+   #:with out #'(+ e- ...)
+   #:with x (generate-temporary)
+   #:with c (assign-type #'(equal? x out) #'Boolean)
+   ;; #:with τ #'(#%plain-app refine Number (#%plain-lambda (x) c))
+   #:with τ #'(Refine (x : Number) c)
    --------
-   [⊢ (+ e- ...) ⇒ Number]])
+   [⊢ out ⇒ τ]])
+
+(define-typed-syntax lsl-<
+  [(_ e1 e2) ≫
+   [⊢ e1 ≫ e1- ⇐ Number]
+   [⊢ e2 ≫ e2- ⇐ Number]
+   -------
+   [⊢ (< e1- e2-) ⇒ Boolean]])
+
+(define-typed-syntax lsl->
+  [(_ e1 e2) ≫
+   [⊢ e1 ≫ e1- ⇐ Number]
+   [⊢ e2 ≫ e2- ⇐ Number]
+   -------
+   [⊢ (> e1- e2-) ⇒ Boolean]])
+
+
+(define-typed-syntax lsl-and
+  [(_ e ...) ≫
+   [⊢ e ≫ e- ⇐ Boolean] ...
+   -------
+   [⊢ (and e- ...) ⇒ Boolean]])
+
+#;(define-syntax join-types
+  (define (join τacc τnext)
+    )
+  (syntax-parser
+    [(_ τ . rst)
+     (foldl )]))
+
+(define-typed-syntax lsl-equal?
+  [(_ e1 e2) ≫
+   [⊢ e1 ≫ e1- ⇒ τ1]
+   [⊢ e2 ≫ e2- ⇒ τ2]
+   #:fail-unless (<: #'τ2 #'τ1) "TEMPORARY"
+   ;; [τ2 τ⊑ τ1]
+   ;; #:with τout (join-types τ1 τ2)
+   -------
+   [⊢ (equal? e1- e2-) ⇒ Boolean]])
+
+(define-for-syntax (prim-base-type v)
+  (syntax-parse v
+    [n:number  #'Number]
+    [b:boolean #'Boolean]
+    [c:char    #'Char]
+    [s:string  #'String]))
+
+
+(define-for-syntax (prim-type v)
+  (let* [[τ-base (prim-base-type v)]
+         [lit (assign-type #`(#%datum- #,v) τ-base)]]
+    #`(Refine (x : #,τ-base) (lsl-equal? x #,lit))))
 
 (define-typed-syntax #%datum
-  [(_ . n:number) ≫
+  [(_ . v) ⇐ env Γ ≫
+   #:with τ (prim-type #'v)
    --------
-   [⊢ (#%datum- . n) ⇒ Number]]
-  [(_ . b:boolean) ≫
-   --------
-   [⊢ (#%datum- . b) ⇒ Boolean]]
-  [(_ . c:char) ≫
-   --------
-   [⊢ (#%datum- . c) ⇒ Char]]
-  [(_ . s:string) ≫
-   --------
-   [⊢ (#%datum- . s) ⇒ String]]
+   [⊢ (#%datum- . v) ⇒ τ]]
   [(_ . x) ≫
    --------
    [#:error (type-error #:src #'x
                         #:msg "Unsupported literal: ~v" #'x)]])
+
+;; Subtype relation
+(begin-for-syntax
+  ;; Proof by logical evaluation (proof search)
+  ;; Given the assumptions in Γ, return true if c can be proven valid
+  ;; Γ - a list of syntax object boolean expressions that are assumed to evaluate to true
+  ;; c - a syntax object boolean expression that we try to prove evaluates to true
+  (define (ple Γ c)
+    ;; Check for syntactic equality
+    ;; Based on https://stackoverflow.com/a/53450175/568190
+    #;(implies (eval-syntax c1) (eval-syntax c2))
+    #t)
+
+  ;; Subtype relation
+  ;; Can a τ1 be passed to a context expecting a τ2?
+  (define (<: τ1 τ2)
+    (<:* (list) τ1 τ2))
+  (define (<:* Γ τ1 τ2)
+    (define τ1- ((current-type-eval) τ1))
+    (define τ2- ((current-type-eval) τ2))
+    (syntax-parse #`(#,τ1- #,τ2-)
+      [((~Π (x1 : τ-in1) τ-out1) (~Π (x2 : τ-in2) τ-out2))
+       (define (r->s τr) τr)
+       (and (<:* Γ #'τ-in2  #'τ-in1)
+            (<:* (cons (r->s #'τ-in2) Γ)
+                 (subst #'x2 #'x1 #'τ-out1) #'τ-out2))]
+      [((~Refine (x1 : τ-base1) c1) (~Refine (x2 : τ-base2) c2))
+       (error "refine subtype")
+       (and (type=? #'τ-base1 #'τ-base2)
+            (let* [(Γ    (list)) ;; TODO how to build this environment?
+                   (Γ+x2 (cons (subst #'x2 #'x1 #'c1) Γ))]
+              #;(printf "<:  ~a /// ~a~n"
+                      (map (λ (k) (list k (syntax-property #'c1 k))) (syntax-property-symbol-keys #'c1))
+                      (syntax-property-symbol-keys #'c2))
+              (ple Γ+x2 #'c2)))]
+      [((~Refine (x1 : τ-base1) _) τ-base2)
+       (<: #'τ-base1 #'τ-base2)]
+      [_ (type=? τ1 τ2)]))
+  (current-typecheck-relation <:))
+
+
 
 ;; TODO separate annotations from the definitions
 #;(define-typerule
@@ -57,9 +222,9 @@
     [≻ (#%module-begin (annotate-def ann def) ...)])
 
 (define-typerule lam
-  [(_ [x:id (~datum :) τin] e) ≫
-   [⊢ τin ≫ τin- ⇐ Type]
-   [[x ≫ x- : τin] ⊢ e ≫ e- ⇒ τout]
+  [(_ [x:id (~datum :) τin] e) ⇐ env Γ  ≫
+   [⊢ τin ≫ τin- (⇐ Type) (⇐ env Γ)]
+   [[x ≫ x- : τin] ⊢ e ≫ e- (⇒ : τout) (⇐ env (x . Γ))]
    --------
    [⊢ (λ (x-) e-) ⇒ (Π (x- : τin) τout)]])
 
@@ -72,15 +237,27 @@
    [⊢ (f- arg-) ⇒ τout-]])
 
 
-(define-red β
-  (#%plain-app ((~literal #%plain-lambda) (x) body) e)
-  ~> ($subst e x body))
+(define-for-syntax (refine-reflect τ e)
+  (syntax-parse τ
+    [((~datum Refine) τ-base c)    #'(Refine [x : τ-base] (and e (lsl-equal? x c)))]
+    [τ-base
+     #:with x (generate-temporary 'v)
+     #:with c (assign-type #`(equal? x #,e) #'Boolean)
+     #'(Refine [x : τ-base] c)]
+    ;; [_ (error "No match for ~a" τ)]
+    [((~datum Π) [x (~datum :) τ-in] τ-out)
+     #:with x- (fresh 'x)
+     #:with τr (refine-reflect #'τ-out (#'e #'x-))
+     #'(Π [x- : τ-in] τr)]))
 
 (define-typerule define #:datum-literals (:)
   [(_ (f:id [x:id : τin]) : τout e) ≫
-   [⊢ [τin ≫ τin- ⇐ Type] [τout ≫ τout- ⇐ Type]]
+   #:with τout-r (refine-reflect #'τout #'e)
+   [⊢ τin ≫ τin- ⇐ Type]
+   [[x ≫ x- : τin-] ⊢ τout-r ≫ τout-r- ⇐ Type]
    --------
-   [≻ (define-typed-variable f (lam [x : τin] e) ⇐ (Π (x : τin-) τout-))]]
+   [≻ (define-typed-variable f (lam [x : τin] e) ⇐ (Π (x : τin-) τout-r-))]]
+  ;; TODO refinement reflection here?
   [(_ (x:id : τ) e) ≫
    --------
    [≻ (define-typed-variable x e ⇐ τ)]])
