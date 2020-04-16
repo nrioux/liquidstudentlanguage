@@ -3,4 +3,6 @@
 (require rackunit/turnstile)
 
 (define (x : Number) 42)
-(check-type x : (Refine (_ : Number) #t))
+(define (id [y : (Refine (_ : Number) #t)]) : Number
+  y)
+(check-type (id x) : #t)
