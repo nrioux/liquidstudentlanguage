@@ -97,11 +97,26 @@
 
 ;; Base type values and operations
 (define-typed-syntax unit
-  [_ ≫
+  [_  (⇐ : (~Refine (x : ~Unit) c)) (⇐ env ϕ) ≫
+   #:with out #'#t
+   #:when (ple #'((equal? x out) . ϕ) #'c)
    -------
-   [⊢ #t ⇒ Unit]])
+   [⊢ out]]
+  [_ ≫
+   #:with out #'#t
+   #:with x (generate-temporary)
+   #:with c (assign-type #'(equal? x out))
+   #:with τ #'(Refine (x : Unit) c)
+   -------
+   [⊢ out ⇒ τ]])
 
 (define-typed-syntax lsl-plus
+  [(_ e ...) (⇐ : (Refine (x : ~Number) c)) (⇐ env ϕ) ≫
+   [⊢ e ≫ e- ⇐ Number] ...
+   #:with out #'(+ e- ...)
+   #:when (ple #'((equal? x out) . ϕ) #'c)
+   -------
+   [⊢ out]]
   [(_ e ...) ≫
    [⊢ e ≫ e- ⇐ Number] ...
    #:with out #'(+ e- ...)
@@ -113,13 +128,28 @@
    [⊢ out ⇒ τ]])
 
 (define-typed-syntax lsl-<
+  [(_ e1 e2) (⇐ : (~Refine (x : ~Boolean) c)) (⇐ env ϕ) ≫
+   [⊢ e1 ≫ e1- ⇐ Number]
+   [⊢ e2 ≫ e2- ⇐ Number]
+   #:with out #'(< e1- e2-)
+   #:when (ple #'((equal? x out) . ϕ) #'c)
+   --------
+   [⊢ out ⇒ τ]]
   [(_ e1 e2) ≫
    [⊢ e1 ≫ e1- ⇐ Number]
    [⊢ e2 ≫ e2- ⇐ Number]
+   #:with out #'(< e1- e2-)
    -------
-   [⊢ (< e1- e2-) ⇒ Boolean]])
+   [⊢ out ⇒ Boolean]])
 
 (define-typed-syntax lsl->
+  [(_ e1 e2) (⇐ : (~Refine (x : ~Boolean) c)) (⇐ env ϕ) ≫
+   [⊢ e1 ≫ e1- ⇐ Number]
+   [⊢ e2 ≫ e2- ⇐ Number]
+   #:with out #'(> e1- e2-)
+   #:when (ple #'((equal? x out) . ϕ) #'c)
+   --------
+   [⊢ out ⇒ τ]]
   [(_ e1 e2) ≫
    [⊢ e1 ≫ e1- ⇐ Number]
    [⊢ e2 ≫ e2- ⇐ Number]
@@ -128,6 +158,12 @@
 
 
 (define-typed-syntax lsl-and
+  [(_ e ...) (⇐ : (Refine (x : ~Number) c)) (⇐ env ϕ) ≫
+   [⊢ e ≫ e- ⇐ Number] ...
+   #:with out #'(and e- ...)
+   #:when (ple #'((equal? x out) . ϕ) #'c)
+   -------
+   [⊢ out]]
   [(_ e ...) ≫
    [⊢ e ≫ e- ⇐ Boolean] ...
    -------
@@ -141,6 +177,13 @@
      (foldl )]))
 
 (define-typed-syntax lsl-equal?
+  [(_ e1 e2) (⇐ : (~Refine (x : ~Boolean) c)) (⇐ env ϕ) ≫
+   [⊢ e1 ≫ e1- ⇐ Number]
+   [⊢ e2 ≫ e2- ⇐ Number]
+   #:with out #'(equal? e1- e2-)
+   #:when (ple #'((equal? x out) . ϕ) #'c)
+   --------
+   [⊢ out ⇒ τ]]
   [(_ e1 e2) ≫
    [⊢ e1 ≫ e1- ⇒ τ1]
    [⊢ e2 ≫ e2- ⇒ τ2]
@@ -164,7 +207,12 @@
     #`(Refine (x : #,τ-base) (lsl-equal? x #,lit))))
 
 (define-typed-syntax #%datum
-  [(_ . v) ⇐ env Γ ≫
+  [(_ . v) (⇐ : (~Refine (x : τ-base) c)) (⇐ env ϕ) ≫
+   #:with out #'(#%datum- . v)
+   #:when (ple #'((equal? x out) . ϕ) #'c)
+   --------
+   [⊢ out]]
+  [(_ . v) ⇐ env ϕ ≫
    #:with τ (prim-type #'v)
    --------
    [⊢ (#%datum- . v) ⇒ τ]]
@@ -173,42 +221,57 @@
    [#:error (type-error #:src #'x
                         #:msg "Unsupported literal: ~v" #'x)]])
 
+(define-typed-variable-syntax
+  [(_ x ≫ x- : τ) ⇐ τr #;(~and τr (~Refine (y : τ-base) c)) #;(⇐ env ϕ) ≫
+   #:do [(printf "~a ⇐ ~a~n" #'x (type->str #'τr))]
+   ;; #:fail-unless (ple #'ϕ (subst #'x- #'y #'c)) "ple failed"
+   --------
+   [⊢ x- ]]
+  [(_ x ≫ x- : τ) (⇐ env _) ≫
+   #:do [(printf "~a ⇒ ~a~n" #'x (type->str #'τ))]
+   --------
+   [⊢ x- ⇒ τ]])
+
 ;; Subtype relation
 (begin-for-syntax
   ;; Proof by logical evaluation (proof search)
-  ;; Given the assumptions in Γ, return true if c can be proven valid
-  ;; Γ - a list of syntax object boolean expressions that are assumed to evaluate to true
+  ;; Given the assumptions in ϕ, return true if c can be proven valid
+  ;; ϕ - a list of syntax object boolean expressions that are assumed to evaluate to true
   ;; c - a syntax object boolean expression that we try to prove evaluates to true
-  (define (ple Γ c)
+  (define (ple ϕ c)
     ;; Check for syntactic equality
     ;; Based on https://stackoverflow.com/a/53450175/568190
     #;(implies (eval-syntax c1) (eval-syntax c2))
+    (printf "(ple ~a ~a)~n" (syntax->datum ϕ) (syntax->datum c))
     #t)
 
   ;; Subtype relation
   ;; Can a τ1 be passed to a context expecting a τ2?
   (define (<: τ1 τ2)
     (<:* (list) τ1 τ2))
-  (define (<:* Γ τ1 τ2)
+  (define (<:* ϕ τ1 τ2)
     (define τ1- ((current-type-eval) τ1))
     (define τ2- ((current-type-eval) τ2))
-    (syntax-parse #`(#,τ1- #,τ2-)
+    (printf "(<: ~a ~a)~n" (type->str τ1-) (type->str τ2-))
+    (syntax-parse (list τ1- τ2-)
       [((~Π (x1 : τ-in1) τ-out1) (~Π (x2 : τ-in2) τ-out2))
        (define (r->s τr) τr)
-       (and (<:* Γ #'τ-in2  #'τ-in1)
-            (<:* (cons (r->s #'τ-in2) Γ)
+       (and (<:* ϕ #'τ-in2  #'τ-in1)
+            (<:* (cons (r->s #'τ-in2) ϕ)
                  (subst #'x2 #'x1 #'τ-out1) #'τ-out2))]
       [((~Refine (x1 : τ-base1) c1) (~Refine (x2 : τ-base2) c2))
        (error "refine subtype")
-       (and (type=? #'τ-base1 #'τ-base2)
-            (let* [(Γ    (list)) ;; TODO how to build this environment?
-                   (Γ+x2 (cons (subst #'x2 #'x1 #'c1) Γ))]
+       #;(and (type=? #'τ-base1 #'τ-base2)
+            (let* [(ϕ    (list)) ;; TODO how to build this environment?
+                   (ϕ+x2 (cons (subst #'x2 #'x1 #'c1) ϕ))]
               #;(printf "<:  ~a /// ~a~n"
                       (map (λ (k) (list k (syntax-property #'c1 k))) (syntax-property-symbol-keys #'c1))
                       (syntax-property-symbol-keys #'c2))
-              (ple Γ+x2 #'c2)))]
+              (ple ϕ+x2 #'c2)))]
       [((~Refine (x1 : τ-base1) _) τ-base2)
        (<: #'τ-base1 #'τ-base2)]
+      [(_ (~Refine (_ : _) _))
+       (error "refine subtype")]
       [_ (type=? τ1 τ2)]))
   (current-typecheck-relation <:))
 
@@ -221,10 +284,10 @@
     -------
     [≻ (#%module-begin (annotate-def ann def) ...)])
 
-(define-typerule lam
-  [(_ [x:id (~datum :) τin] e) ⇐ env Γ  ≫
-   [⊢ τin ≫ τin- (⇐ Type) (⇐ env Γ)]
-   [[x ≫ x- : τin] ⊢ e ≫ e- (⇒ : τout) (⇐ env (x . Γ))]
+#;(define-typerule lam
+  [(_ [x:id (~datum :) τin] e) ⇐ env ϕ  ≫
+   [⊢ τin ≫ τin- (⇐ Type) (⇐ env ϕ)]
+   [[x ≫ x- : τin] ⊢ e ≫ e- (⇒ : τout) (⇐ env (x . ϕ))]
    --------
    [⊢ (λ (x-) e-) ⇒ (Π (x- : τin) τout)]])
 
@@ -256,13 +319,20 @@
    [⊢ τin ≫ τin- ⇐ Type]
    [[x ≫ x- : τin-] ⊢ τout-r ≫ τout-r- ⇐ Type]
    --------
-   [≻ (define-typed-variable f (lam [x : τin] e) ⇐ (Π (x : τin-) τout-r-))]]
+   [≻ (define-typed-variable f (λ (x-) e-) ⇒ (Π (x- : τin-) τout-r-))]]
   ;; TODO refinement reflection here?
   [(_ (x:id : τ) e) ≫
+   [⊢ e ≫ e- (⇐ : τ)]
    --------
-   [≻ (define-typed-variable x e ⇐ τ)]])
+   [≻ (define-typed-variable x e- ⇒ τ)]])
 
 (define-typerule lsl-cond #:datum-literals (else)
+  [(_ [test body] ...+) (⇐ : τ) (⇐ env ϕ) ≫
+   [⊢ test ≫ test- (⇐ : Boolean) (⇐ env ϕ)] ...
+   ;; TODO constraints for earlier tests need to be negated in later bodies
+   [⊢ body ≫ body- (⇐ : τ) (⇐ env (test- . ϕ))] ...
+   --------
+   [⊢ (cond [test0- body0-] [test- body-] ...)]]
   [(_ [test0 body0] [test body] ...) ≫
    [⊢ test0 ≫ test0- ⇐ Boolean]
    [⊢ body0 ≫ body0- ⇒ τ]
