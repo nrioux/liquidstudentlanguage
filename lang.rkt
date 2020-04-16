@@ -44,25 +44,26 @@
 (define-syntax lq-predicate
   (syntax-parser
     [(_ ~Number)  number?]
-    #;[(_ ~Unit)    ???]
+    [(_ ~Unit)    boolean?] ;; unit encoded as #t
     [(_ ~Boolean) boolean?]
     [(_ ~String)  string?]
     [(_ ~Char)    char?]
     #;[(_ ~SExp)    ???]))
 
-#;(define-for-syntax base-type?
-  (λ (τ) (or (Number? τ) (Boolean? τ) (String? τ) (Char? τ) (SExp? τ)))
-  #;(syntax-parser
-    [(_ τ)
-     (syntax-parse ((current-type-eval) #'τ)
-       [~Number #'#t]
-       [_       #'#f])]))
-#;(printf "Number? ~a~n" (base-type? Boolean))
+(begin-for-syntax
+  (define (lq-constraint τ x)
+    (syntax-parse τ
+      [(~or ~Number ~Boolean ~String ~Char _) #'#t]
+      [~Unit #'(equal? x #t)])))
+
 
 (define-type Π #:with-binders [X : Type] : Type -> Type)
 (define-type Σ #:with-binders [X : Type] : Type -> Type)
 
 ;; Refinement Types
+;; Based on the turnstile typedef implementation
+;; Originally re-implemented so we have access to the internal refine struct, but
+;; I'm not sure if this is still necessary
 (struct refine (τ c))
 (define-typed-syntax Refine
   [(_ [x : τ:base-type] c) ≫
@@ -91,10 +92,6 @@
                   ((~literal #%plain-lambda) (x) c))
                  #'ty-to-match))]))))
 
-#;(define-syntax Prop
-  (syntax-parser
-    [(_ c) #'(Refine [_ : Unit] c)]))
-
 ;; Base type values and operations
 (define-typed-syntax unit
   [_  (⇐ : (~Refine (x : ~Unit) c)) (⇐ env ϕ) ≫
@@ -122,7 +119,6 @@
    #:with out #'(+ e- ...)
    #:with x (generate-temporary)
    #:with c (assign-type #'(equal? x out) #'Boolean)
-   ;; #:with τ #'(#%plain-app refine Number (#%plain-lambda (x) c))
    #:with τ #'(Refine (x : Number) c)
    --------
    [⊢ out ⇒ τ]])
@@ -292,9 +288,9 @@
    [⊢ (λ (x-) e-) ⇒ (Π (x- : τin) τout)]])
 
 (define-typerule app
-  [(_ f arg) ≫
-   [ ⊢ f ≫ f- ⇒ (~Π (x : τin) τout) ]
-   [ ⊢ arg ≫ arg- ⇐ τin]
+  [(_ f arg) (⇐ env ϕ)  ≫
+   [ ⊢ f ≫ f- (⇒ : (~Π (x : τin) τout)) (⇐ env ϕ) ]
+   [ ⊢ arg ≫ arg- (⇐ : τin) (⇐ env ϕ)]
    #:with τout- (reflect (subst #'arg- #'x #'τout))
    --------
    [⊢ (f- arg-) ⇒ τout-]])
@@ -318,6 +314,8 @@
    #:with τout-r (refine-reflect #'τout #'e)
    [⊢ τin ≫ τin- ⇐ Type]
    [[x ≫ x- : τin-] ⊢ τout-r ≫ τout-r- ⇐ Type]
+   #:with c (lq-constraint #'τin- #'x-)
+   [[x ≫ _ : τin-] ⊢ e ≫ e- (⇐ : τout-r-) (⇐ env (c))]
    --------
    [≻ (define-typed-variable f (λ (x-) e-) ⇒ (Π (x- : τin-) τout-r-))]]
   ;; TODO refinement reflection here?
