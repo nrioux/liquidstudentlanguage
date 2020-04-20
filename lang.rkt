@@ -3,8 +3,8 @@
          syntax/parse
          (for-syntax rosette/safe))
 
-(provide Π Refine Boolean String Char Number SExp
-          require
+(provide Π Refine Boolean Unit String Char Integer Real
+          require unit
 
          [rename-out
           (lsl-datum         #%datum)
@@ -36,7 +36,8 @@
 
 ;; (define-type Condition : Type)
 
-(define-type Number : Type)
+(define-type Integer : Type)
+(define-type Real : Type)
 (define-type Unit : Type)
 (define-type Boolean : Type)
 (define-type String : Type)
@@ -48,7 +49,7 @@
   (define-syntax ~base-type
     (pattern-expander
      (syntax-parser
-       [_ #'(~or ~Number ~Unit ~Boolean ~String ~Char ~SExp)])))
+       [_ #'(~or ~Integer ~Real ~Unit ~Boolean ~String ~Char ~SExp)])))
 
   (define-syntax-class base-type #:description "a base type"
     (pattern (~and τ (~parse (~base-type)
@@ -62,8 +63,7 @@
     (pattern (_:env-item ...)))
 
   (define-syntax-class env/f #:description "an environment"
-    (pattern (~or (~and #f (~bind [env #'()]))
-                  (~and ϕ:env (~bind [env #'ϕ]))))))
+    (pattern (~or #f (~and ϕ:env)))))
 
 
 
@@ -85,7 +85,6 @@
      (syntax-parser
        [(_ [x:id (~datum :) τin] τout)
         #:with ty-to-match (generate-temporary)
-        #:do [(printf "in Π~ ~n")]
         #'(~and ty-to-match
                 (~parse
                  ((~literal #%plain-app)
@@ -107,7 +106,7 @@
 (struct refine (τ c))
 (define-typed-syntax Refine
   [(_ [x : τ:base-type] c) ⇐ env ϕ-orig:env/f ≫
-   #:with ϕ:env #'ϕ-orig.env
+   #:with ϕ:env (or (syntax-e #'ϕ-orig) env-empty)
    [⊢ τ ≫ τ- (⇐ : Type) (⇐ env ϕ)]
    [[x ≫ x- : τ] ⊢ c ≫ c- (⇐ : Boolean) (⇐ env ϕ)]
    -------
@@ -125,7 +124,6 @@
     (pattern-expander
      (syntax-parser
        [(_ [x:id (~datum :) τ-base] c)
-        #:do [(printf "in Π~ ~n")]
         #:with ty-to-match (generate-temporary)
         #'(~and ty-to-match
                 (~parse
@@ -150,32 +148,30 @@
       [(~Refine (_ : τ-base) _) #'τ-base]
       [_ #f]))
 
-  (define (get-refinement x τ)
-    (syntax-parse τ
-      [τ-base:base-type #'#t]
-      [(~Refine (v : τ-base) c) #`($subst #,x v c)]
-      [_ #f]))
-
-  ;; Get a constraint for the SMT solve as a syntax object that describes the
+  ;; Get a constraint for the SMT solver as a syntax object that describes the
   ;; variable x given that it has type τ
   (define (lq-constraint x τ)
     (syntax-parse τ
-      [(~or ~Number ~Boolean ~String ~Char) #'#t]
-      [~Unit #'(equal? x #t)]
+      [(~or ~Integer ~Real ~Boolean ~String ~Char)
+       #:with p (type->lq-pred τ)
+       #'p]
+      [~Unit #`(equal? #,x #t)]
       [(~Refine (v : τ-base) c)
+       #:with p (type->lq-pred τ)
        #:with c-base (lq-constraint x #'τ-base)
-       #`(and c-base ($subst #,x v c))]
+       #`(and c-base (p #,x) ($subst #,x v c))]
       [_ #'#t]))
 
   (define type->lq-pred
     (syntax-parser
-      [~Number  real?]
-      [~Unit    boolean?] ;; unit encoded as #t
-      [~Boolean boolean?]
-      [~String  string?]
-      [~Char    char?]
+      [~Real    #'real?]
+      [~Integer #'integer?]
+      [~Unit    #'boolean?] ;; unit encoded as #t
+      [~Boolean #'boolean?]
+      [~String  #'string?]
+      [~Char    #'char?]
       #;[(_ ~SExp)    ???]
-      [(~Π [x : τin] τout) integer?]
+      [(~Π [x : τin] τout) #'integer?]
       [(~Refine [x : τ-base] _) (type->lq-pred #'τ-base)]))
 
   (define env-empty (list))
@@ -196,86 +192,87 @@
   [_ ≫
    #:with out #'#t
    #:with x (generate-temporary)
-   #:with c (assign-type #'(equal? x out))
+   #:with c (assign-type #'(equal? x out) #'Boolean)
    #:with τ #'(Refine (x : Unit) c)
    -------
    [⊢ out ⇒ τ]])
 
 (define-typed-syntax lsl-plus
   [(_ e ...) (⇐ env ϕ) ≫
-   [⊢ e ≫ e- (⇐ : Number) (⇐ env ϕ)] ...
+   [⊢ e ≫ e- (⇐ : Real) (⇐ env ϕ)] ...
    #:with out #'(+ e- ...)
    #:with x (generate-temporary)
    #:with c (assign-type #'(equal? x out) #'Boolean)
-   #:with τ #'(Refine (x : Number) c)
+   #:with τ #'(Refine (x : Real) c)
    --------
    [⊢ out ⇒ τ]])
 
 (define-typed-syntax lsl-minus
-  [(_ e ...) (⇐ env ϕ) ≫
-   [⊢ e ≫ e- (⇐ : Number) (⇐ env ϕ)] ...
-   #:with out #'(- e- ...)
+  [(_ e1 e2) (⇐ env ϕ:env) ≫
+   [⊢ e1 ≫ e1- (⇐ : Real) (⇐ env ϕ)]
+   [⊢ e2 ≫ e2- (⇐ : Real) (⇐ env ϕ)]
+   #:with out #'(- e1- e2-)
    #:with x (generate-temporary)
    #:with c (assign-type #'(equal? x out) #'Boolean)
-   #:with τ #'(Refine (x : Number) c)
+   #:with τ #'(Refine/untyped (x : Real) c)
    --------
    [⊢ out ⇒ τ]])
 
 (define-typed-syntax lsl-mult
   [(_ e ...) (⇐ env ϕ) ≫
-   [⊢ e ≫ e- (⇐ : Number) (⇐ env ϕ)] ...
+   [⊢ e ≫ e- (⇐ : Real) (⇐ env ϕ)] ...
    #:with out #'(* e- ...)
    #:with x (generate-temporary)
    #:with c (assign-type #'(equal? x out) #'Boolean)
-   #:with τ #'(Refine (x : Number) c)
+   #:with τ #'(Refine (x : Real) c)
    --------
    [⊢ out ⇒ τ]])
 
 (define-typed-syntax lsl-div
   [(_ e1 e2) (⇐ env ϕ) ≫
-   [⊢ e1 ≫ e1- (⇐ : Number) (⇐ env ϕ)]
-   [⊢ e2 ≫ e2- (⇐ : (Refine (v : Number) (not (equal? v 0)))) (⇐ env ϕ)]
+   [⊢ e1 ≫ e1- (⇐ : Real) (⇐ env ϕ)]
+   [⊢ e2 ≫ e2- (⇐ : (Refine (v : Real) (not (equal? v 0)))) (⇐ env ϕ)]
    #:with out #'(/ e1- e2-)
    #:with x (generate-temporary)
    #:with c (assign-type #'(equal? x out) #'Boolean)
-   #:with τ #'(Refine (x : Number) c)
+   #:with τ #'(Refine (x : Real) c)
    --------
    [⊢ out ⇒ τ]])
 
 (define-typed-syntax lsl-<
   [(_ e1 e2) ⇐ env ϕ ≫
-   [⊢ e1 ≫ e1- (⇐ : Number) (⇐ env ϕ)]
-   [⊢ e2 ≫ e2- (⇐ : Number) (⇐ env ϕ)]
+   [⊢ e1 ≫ e1- (⇐ : Real) (⇐ env ϕ)]
+   [⊢ e2 ≫ e2- (⇐ : Real) (⇐ env ϕ)]
    #:with out #'(< e1- e2-)
    -------
    [⊢ out ⇒ Boolean]])
 
 (define-typed-syntax lsl->
   [(_ e1 e2) ⇐ env ϕ ≫
-   [⊢ e1 ≫ e1- (⇐ : Number) (⇐ env ϕ)]
-   [⊢ e2 ≫ e2- (⇐ : Number) (⇐ env ϕ)]
+   [⊢ e1 ≫ e1- (⇐ : Real) (⇐ env ϕ)]
+   [⊢ e2 ≫ e2- (⇐ : Real) (⇐ env ϕ)]
    -------
    [⊢ (> e1- e2-) ⇒ Boolean]])
 
 (define-typed-syntax lsl-<=
   [(_ e1 e2) ⇐ env ϕ ≫
-   [⊢ e1 ≫ e1- (⇐ : Number) (⇐ env ϕ)]
-   [⊢ e2 ≫ e2- (⇐ : Number) (⇐ env ϕ)]
+   [⊢ e1 ≫ e1- (⇐ : Real) (⇐ env ϕ)]
+   [⊢ e2 ≫ e2- (⇐ : Real) (⇐ env ϕ)]
    #:with out #'(<= e1- e2-)
    -------
    [⊢ out ⇒ Boolean]])
 
 (define-typed-syntax lsl->=
   [(_ e1 e2) ⇐ env ϕ ≫
-   [⊢ e1 ≫ e1- (⇐ : Number) (⇐ env ϕ)]
-   [⊢ e2 ≫ e2- (⇐ : Number) (⇐ env ϕ)]
+   [⊢ e1 ≫ e1- (⇐ : Real) (⇐ env ϕ)]
+   [⊢ e2 ≫ e2- (⇐ : Real) (⇐ env ϕ)]
    -------
    [⊢ (>= e1- e2-) ⇒ Boolean]])
 
 
 (define-typed-syntax lsl-integer?
   [(_ e) ⇐ env ϕ:env ≫
-         [⊢ e ≫ e- (⇐ : Number) (⇐ env ϕ)]
+         [⊢ e ≫ e- (⇐ : Real) (⇐ env ϕ)]
          #:with x (generate-temporary 'x)
          #:with out #'(integer? e-)
          #:with v (generate-temporary 'v)
@@ -286,7 +283,7 @@
 
 (define-typed-syntax lsl-positive?
   [(_ e) ⇐ env ϕ:env ≫
-   [⊢ e ≫ e- (⇐ : Number) (⇐ env ϕ)]
+   [⊢ e ≫ e- (⇐ : Real) (⇐ env ϕ)]
    #:with x (generate-temporary 'x)
    #:with out #'(positive? e-)
    #:with v (generate-temporary 'v)
@@ -332,7 +329,8 @@
 
 (define-for-syntax (prim-base-type v)
   (syntax-parse v
-    [n:number  #'Number]
+    [n:integer #'Integer]
+    [n:number  #'Real]
     [b:boolean #'Boolean]
     [c:char    #'Char]
     [s:string  #'String]))
@@ -344,9 +342,9 @@
             [_     #f]))
   (attach e 'env ϕ))
 (define-for-syntax (prim-type v)
-  (let* [[τ-base (prim-base-type v)]
-  [lit #`(quote #,v) #;(assign-type #`(#%datum- #,v) τ-base)]]
-  (assign-type #`(Refine/untyped (x : #,τ-base) (equal? x #,lit)) #'Type)))
+  (with-syntax [[τ-base (prim-base-type v)]
+                [lit #`(quote #,v) #;(assign-type #`(#%datum- #,v) τ-base)]]
+    (assign-type #'(Refine/untyped (x : τ-base) (equal? x lit)) #'Type)))
 
 (define-typed-syntax lsl-datum
   [(_ . v) ⇐ env ϕ:env ≫
@@ -354,7 +352,9 @@
    [⊢ τ ≫ τ- (⇐ : Type) (⇐ env ϕ)]
    --------
    [⊢ (#%datum- . v) ⇒ τ]]
-  [(_ . x) ≫
+  [(_ . x) ⇐ env ϕ ≫
+           #:with _:env #'ϕ
+   #:do [(printf "bad datum~n")]
    --------
    [#:error (type-error #:src #'x
                         #:msg "Unsupported literal: ~v" #'x)]])
@@ -372,22 +372,25 @@
                      [(x p c-prem)
                       #:with def-sym #'(define-symbolic x p)
                       #:with premise #'(assert c-prem)
-                      (list #'def-sym #'premise)]
+                      (cons #'def-sym #'premise)]
                      [(#%constr c-prem)
                       #:with premise #'(assert c-prem)
-                      (list #'premise)]))
-    (with-syntax
-      [(prems (append-map build1 (reverse (syntax->list ϕ))))
+                      (cons #'(begin) #'premise)]))
+    (define initial (map build1 (reverse (syntax->list ϕ))))
+    (with-syntax*
+      [((defs ...) (map car initial))
+       (prems (map cdr initial))
        (conclusion #`(assert #,c))
        (program #'(begin
                      (clear-asserts!)
-                     (verify #:assume (begin  prems)
-                             #:guarantee conclusion)))]
+                     defs ...
+                     (verify #:assume (begin . prems) #:guarantee conclusion)))]
       (define ns (make-empty-namespace))
       (namespace-attach-module (current-namespace) 'rosette/safe ns)
       (namespace-require 'rosette/safe ns)
+      (printf "PROGRAM: ~a~n" (syntax->datum #'program))
       (define solver-result (eval (syntax->datum #'program) ns))
-      ;; (printf "EVAL RESULT: ~a~n" solver-result)
+      (printf "EVAL RESULT: ~a~n" solver-result)
       (unsat? solver-result)))
 
   (define (get-env e)
@@ -395,7 +398,7 @@
   (define (strengthen-exact τ e)
     (syntax-parse ((current-type-eval) τ)
       [(~Refine (v : τ-base) c)
-       #`(Refine/untyped (v : τ-base) (and c v #,e))]
+       #`(Refine/untyped (v : τ-base) (and c (equal? v #,e)))]
       [τ-base:base-type
        #`(Refine/untyped (v : τ-base) (equal? v #,e))]
       [_ τ]))
@@ -413,6 +416,11 @@
     (not (<: ϕ τ-actual τ-exp)))
   (current-⇐-check default-⇐)
 
+  (define (overlap? τ-base1 τ-base2)
+    (syntax-parse (list τ-base1 τ-base2)
+      [(~or (~Real ~Integer) (~Integer ~Real)) #t]
+      [(_:base-type _:base-type) (type=? τ-base1 τ-base2)]))
+
   ;; Subtype relation
   ;; Can a τ1 be passed to a context expecting a τ2?
   (define (<: ϕ τ1 τ2)
@@ -426,11 +434,19 @@
       [(_ (~Refine (x2 : τ-base2) c2))
        ;; #:do [(printf "Subtype: ~a <: ~a~n" (type->str τ1) (type->str τ2))]
        #:with τ-base1:base-type (get-base-type τ1-)
-       #:when (type=? #'τ-base1 #'τ-base2)
+       ;; optimization: only try to convert one type to another when we know the
+       ;; base types are convertible
+       #:when (overlap? #'τ-base1 #'τ-base2)
        #:with ϕ+x2:env (env-ext ϕ #'x2 τ1-)
        (ple #'ϕ+x2 #'c2)]
+      #;[(_ ~Integer)
+       #:with τ-base1:base-type (get-base-type τ1-)
+       #:with ~Real #'τ-base1
+       #:with ϕ+x2:env (env-ext ϕ #'x2 τ1-)
+       (ple #'ϕ+x2 #'(integer? x2))]
       [((~Refine (x1 : τ-base1) _) τ-base2:base-type)
        (<: ϕ #'τ-base1 #'τ-base2)]
+      [(~Integer ~Real) #t]
       [_ (type=? τ1 τ2)]))
   (current-typecheck-relation (λ (τ1 τ2)
                                 (printf "current-typecheck-relation ~a <: ~a ~n" (type->str τ1) (type->str τ2))
@@ -477,75 +493,90 @@
 
 
 (define-for-syntax (refine-reflect τ e ϕ)
-  (printf "in refine-reflect for ~a~n" (type->str τ))
   (syntax-parse τ
     [(~Refine [x : τ-base] c)
-     #'(Refine [x : τ-base] (and e (lsl-equal? x c)))]
-    [(~Π [x : τ-in] τ-out)
+     #:with e+ϕ (set-env e ϕ)
+     #`(Refine/untyped [x : τ-base] (and c (equal? x e+ϕ)))]
+    [(~Π [x : τin] τout)
      #:with x- (fresh 'x)
      #:with e+ϕ (set-env e ϕ)
-     #:with τr (refine-reflect #'τ-out (#'e+ϕ #'x-))
+     #:with τout- (refine-reflect #'τ-out #'(e+ϕ x-))
      #'(Π [x- : τ-in] τr)]
     [τ-base:base-type
      #:with x (generate-temporary 'v)
      #:with e+ϕ (set-env e ϕ)
      #:with c (assign-type #'(equal? x e+ϕ) #'Boolean)
-     #'(Refine [x : τ-base] c)]))
+     #'(Refine/untyped [x : τ-base] c)]))
 
 (define-typerule lsl-define #:datum-literals (:)
   [(_ (f:id [x:id : τin]) : τout e) ⇐ env ϕ:env ≫
-   #:do [(printf "BEGIN define fun ~a~n" (syntax->datum #'f))]
-   #:with τout-r (refine-reflect #'τout #'e #'ϕ)
-   #:do [(printf "reflected fun type ~n")]
-   ;; [⊢ (Π (x : τin) τout-r) ≫ τ- (⇐ : Type) (⇐ env ϕ)]
+   #:with τ-orig #'(Π (x : τin) τout)
+   ;; TODO could f appear in the type of f as written by the user?
+   ;; According to LH paper, yes. I'm not sure how this is useful though.
+   [⊢ τ-orig ≫ τ-orig- (⇐ : Type) (⇐ env ϕ)]
+   #:with (~Π (xt- : τin-) τout-) #'τ-orig-
 
-   ;; #:with (~Π (xt- : τin-) τout-r-) #'τ-
+   ;; HACK The type of f should be τ, but there is a circular dependency that
+   ;; can't easily be handled here so we use τ-orig instead. This is only for checking
+   ;; the body and type of f; other definitions will/should see f at type τ-.
+   #:do [(define Γf (expand1/bind #'f #': #'τ-orig-))]
 
    ;; We want a premise along these lines:
    ;;   [[x ≫ xe- : τin- ] ⊢ e ≫ e- (⇐ : ($subst x xt- τout-r)) (⇐ env ϕ-in)]
    ;; But ϕ-in must contain a constraint on xe-, and xe- is not bound in ϕ-in by
-   ;; this rule. So we must do things manually.
+   ;; this rule. So we must manually expand the environment first.
 
-   ;; Expand the context [x ≫ xe- : τin-]
-   ;; #:do [(define Γ (expand1/bind #'x #': #'τin-))]
-   #:with τ (set-env #'(Π (x : τin) τout) #'ϕ)
-   #:do [(printf "begin expand fun type~n")]
-   #:do [(define Γ (expands/bind #'(x f) #'(: :) #'(τin τ)))]
-   #:do [(printf "end expand fun type~n")]
-   #:with (xe- f-) (env-xs Γ)
-   #:with (τin- τ-) (env-τs Γ)
+   ;; Expand the context Γf, [x ≫ xe- : τin-]
+   #:do [(define Γfx (expand1/bind #'x #': #'τin- Γf))]
+   #:with (f- xe-) (env-xs Γfx)
 
-   ;; Build constraints for the context
-   #:with ϕ-in:env (env-ext #'ϕ #'xe- #'τin-) ;; TODO add f to ϕ
+   ;; Build constraints for the context no need to add f to ϕ because it is of
+   ;; function type
+   #:with ϕ+xe-:env (env-ext #'ϕ #'xe- #'τin-)
+   #:with ϕ+xt-:env (env-ext #'ϕ #'xe- #'τin-)
 
-   ;; Expand output type
-   #:do [(printf "expand output type~n")]
-   #:with τout-r- (expand1 (set-env #'τout-r #'ϕ-in) Γ)
-   #:do [(printf "end expand output type~n")]
+   ;; Now we can expand e [e ≫ e- (⇐ : ($subst x xt- τout-r)) (⇐ env ϕ+xe-)]
+   #:with e/exp (add-expected-type (set-env #'e #'ϕ+xe-) #'τout-)
+   #:with e-  (expand1 #'e/exp Γfx)
 
-   ;; Now we can expand e [e ≫ e- (⇐ : ($subst x xt- τout-r)) (⇐ env ϕ-in)]
-   #:with e/exp (add-expected-type (attach #'e 'env #'ϕ-in) #'τout-r-)
-   #:with e-  (expand1 #'e/exp Γ)
-   #:with e-tmp #'e- #;(get-orig #'e-) ;; Uncomment if getting mysterious bad syntax errors
+   ;; Check that body has expected type
+   #:with e-tmp (set-env #'e- #'ϕ+xe-) #;(get-orig #'e-) ;; Uncomment if getting mysterious bad syntax errors
    #:with τ-tmp (detach/check #'e- ':)
+   ;; Call out to the ⇐ rule to compare the expected/actual types.
+   #:fail-unless (not ((current-⇐-check) #'e-tmp ':)) (typecheck-fail-msg/1 #'τout #'τ-tmp #'e-tmp)
 
-   ;; Call out to the ⇐ rule to check that e was well typed.
-   #:fail-unless (not ((current-⇐-check) #'e-tmp ':)) (typecheck-fail-msg/1 #'τout-r #'τ-tmp #'e-tmp)
-   #:do [(printf "END define fun~n")]
 
+   ;; REFINEMENT REFLECTION
+   ;; NOTE We use e-, not e here, to prevent things from expanding by accident
+   ;; later on without an environment
+   #:with τout-r (refine-reflect #'τout- #'($subst xt- x e-) #'ϕ+xt-)
+   ;; Expand output type
+   #:with τout-r- (expand1 (set-env #'($subst x xt- τout-r) #'ϕ+xt-) Γfx)
+   #:with τ (set-env #'(Π (xt- : τin-) τout-r) #'ϕ)
+
+   ;; NOTE f must appear in the environment below, because refinement reflection
+   ;; will put the body of a recursive function into its type
+   ;; [ Γf ⊢ τ ≫ τ- (⇐ : Type) (⇐ env ϕ)]
+   #:with τ- (expand1 (set-env #'τ #'ϕ) Γf)
+   ;; TODO check τ- has type Type?
 
    --------
    [⊢ (begin (define-typed-variable-rename f ≫ f- : τ-)
              (define (f- xe-) e-))
       (⇒ env ϕ)]]
-  ;; TODO refinement reflection here?
-  [(_ (x:id : τ) e) ⇐ env ϕ:env ≫
-   #:with τr (refine-reflect #'τ #'e #'ϕ)
+  [(_ (x:id : τ-orig) e) ⇐ env ϕ:env ≫
+   ;; TODO THIS DOES NOT SUPPORT RECURSIVE DEFINITIONS
+   ;; Recursion support would require mirroring the above rule for functions
+   [⊢ τ-orig ≫ τ-orig- (⇐ : Type) (⇐ env ϕ)]
+
+   #:with τr (refine-reflect #'τ-orig- #'e #'ϕ)
    [⊢ τr ≫ τr- (⇐ : Type) (⇐ env ϕ)]
-   #:with ϕ-new:env (env-ext #'ϕ #'x #'τr-)
-   [⊢ e ≫ e- (⇐ : τr) (⇐ env ϕ-new)]
+   #:with ϕ-new:env #'ϕ #;(env-ext #'ϕ #'x #'τr-)
+   [[x ≫ x- : τ-orig-] ⊢ e ≫ e- (⇐ : τr) (⇐ env ϕ-new)]
    --------
-   [⊢ (define-typed-variable x e- ⇒ τr-) (⇒ env ϕ-new)]])
+   [⊢ (begin (define-typed-variable-rename x ≫ x- : τr-)
+             (define x- e-))
+      (⇒ env ϕ-new)]])
 
 
 
@@ -590,6 +621,11 @@
    --------
    [⊢ e-]])
 
+(define-for-syntax (join-meet-types τ1 τ2)
+  (syntax-parse (list τ1 τ2)
+    [(~or (~Real ~Integer)
+          (~Integer ~Real)) #'Integer]
+    [_ (if (type=? τ1 τ2) τ1 #f)]))
 (define-for-syntax (meet-types τ1 τ2)
   (syntax-parse (list τ1 τ2)
     [((~Π (x1 : τin1) τout1) (~Π (x2 : τin2) τout2))
@@ -599,14 +635,20 @@
      #:when (and #'τin #'τout)
      #'(Π (x : τin) τout)]
     [_
-     #:with τ-base1 (get-base-type τ1)
-     #:with τ-base2 (get-base-type τ2)
-     #:when (and #'τ-base1 #'τ-base2 (type=? #'τ-base1 #'τ-base2))
+     #:with τ-base1:base-type (get-base-type τ1)
+     #:with τ-base2:base-type (get-base-type τ2)
+     #:with τ-base:base-type (join-base-types #'τ-base1 #'τ-base2)
      #:with v (generate-temporary 'v)
-     #:with c1 (get-refinement #'v τ1)
-     #:with c2 (get-refinement #'v τ2)
+     #:with c1 (lq-constraint #'v τ1)
+     #:with c2 (lq-constraint #'v τ2)
      #'(Refine/untyped (v : τ-base1) (and c1 c2))]
     [_ #f]))
+
+(define-for-syntax (join-base-types τ1 τ2)
+  (syntax-parse (list τ1 τ2)
+    [(~or (~Real ~Integer)
+          (~Integer ~Real)) #'Real]
+    [_ (if (type=? τ1 τ2) τ1 #f)]))
 (define-for-syntax (join-types τ1 τ2)
   (syntax-parse (list τ1 τ2)
     [((~Π (x1 : τin1) τout1) (~Π (x2 : τin2) τout2))
@@ -618,22 +660,23 @@
     [_
      #:with τ-base1 (get-base-type τ1)
      #:with τ-base2 (get-base-type τ2)
-     #:when (and #'τ-base1 #'τ-base2 (type=? #'τ-base1 #'τ-base2))
+     #:when (and (syntax-e #'τ-base1) (syntax-e #'τ-base2))
+     #:with τ-base:base-type (join-base-types #'τ-base1 #'τ-base2)
      #:with v (generate-temporary #'v)
-     #:with c1 (get-refinement #'v τ1)
-     #:with c2 (get-refinement #'v τ2)
-     #'(Refine/untyped (v : τ-base1) (or c1 c2))]
+     #:with c1 (lq-constraint #'v τ1)
+     #:with c2 (lq-constraint #'v τ2)
+     #'(Refine/untyped (v : τ-base) (or c1 c2))]
     [_ #f]))
 
 (define-typerule lsl-if
-  [(_ test e1 e2) (⇐ env ϕ) ≫
+  [(_ test e1 e2) (⇐ env ϕ:env) ≫
      [⊢ test ≫ test- (⇐ : Boolean) (⇐ env ϕ)]
      #:with ϕ1 (env-ext-constr #'ϕ #'test-)
      [⊢ e1 ≫ e1- (⇒ : τ1) (⇐ env ϕ1)]
      #:with ϕ2 (env-ext-constr #'ϕ #'(not test-))
      [⊢ e2 ≫ e2- (⇒ : τ2) (⇐ env ϕ2)]
      #:with τ (join-types #'τ1 #'τ2)
-     #:fail-unless #'τ (format "types ~a and ~a are not compatible" (type->str #'τ1) (type->str #'τ2))
+     #:fail-unless (syntax-e #'τ) (format "types ~a and ~a are not compatible" (type->str #'τ1) (type->str #'τ2))
      -------
      [⊢ (if test- e1- e2-) ⇒ τ]])
 
