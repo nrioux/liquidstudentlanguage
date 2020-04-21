@@ -7,12 +7,15 @@
           require unit
 
          [rename-out
-          (lsl-datum         #%datum)
-          (lsl-module-begin #%module-begin)
+          (lsl-datum           #%datum)
+          (lsl-module-begin    #%module-begin)
           (lsl-top-interaction #%top-interaction)
-          (app           #%app)
-          (lsl-define        define)
-          #;(lsl-cond      cond)
+          (lsl-app             #%app)
+          (lsl-:         :)
+          (lsl-define    define)
+          (lsl-let       let)
+          (lsl-error     error)
+          (lsl-cond      cond)
           (lsl-if        if)
           #;(define-struct define-struct)
           (lsl-plus      +)
@@ -63,27 +66,50 @@
     (pattern (_:env-item ...)))
 
   (define-syntax-class env/f #:description "an environment"
-    (pattern (~or #f (~and ϕ:env)))))
+    (pattern (~or #f (~and ϕ:env))))
+
+  (begin-for-syntax
+    (define-syntax-class ellipsis
+      (pattern (~literal ...)))))
 
 
+(define-for-syntax (expand1/bind+env x xtag τ ϕ Γ)
+  (define τ- (expand1 (set-env τ ϕ) Γ) #;((current-type-eval) (set-env τ ϕ) Γ))
+  (define ϕ-next (env-ext ϕ x τ-))
+  (define Γ-next (env-add x xtag τ- Γ))
+  (cons ϕ-next Γ-next))
+
+(define-for-syntax (expands/bind+env xs xtags τs ϕ [Γ (mk-new-env)])
+  (stx-fold (λ (x xtag τ acc)
+              (expand1/bind+env x xtag τ (car acc) (cdr acc)))
+           (cons ϕ Γ) xs xtags τs))
 
 ;; Pi Types
 ;; Based on the turnstile typedef implementation
 ;; Re-implemented rather than using define-type to propagate env syntax property
-(struct pi (τ c))
+(struct pi (τs c))
 (define-typed-syntax Π
-  [(_ [x : τin] τout) ⇐ env ϕ:env ≫
-   [⊢ τin ≫ τin- (⇐ : Type) (⇐ env ϕ)]
-   [[x ≫ x- : τin] ⊢ τout ≫ τout- (⇐ : Type) (⇐ env ϕ)]
+  [(_ [x:identifier (~and xtag :) τin] ... τout) ⇐ env ϕ:env ≫
+   ;;[⊢ τin ≫ τin- (⇐ : Type) (⇐ env ϕ)]
+   #:do [(define envs (expands/bind+env #'(x ...) #'(xtag ...) #'(τin ...) #'ϕ))
+         (define ϕ-next (car envs))
+         (define Γ (cdr envs))]
+   #:with (x- ...)   (env-xs Γ)
+   #:with (τin- ...) (env-τs Γ)
+   #:with τout- (expand1 (set-env #'τout ϕ-next) Γ)
+
+   ;; There seems to be a bug in turnstile with the following premise
+   ;; If τin ... = τ1 τ2, we end up with τin- ... = τ1- τ1-
+   ;; [[x ≫ x- : τin ≫ τin- ⇐ Type] ... ⊢ [τout ≫ τout- (⇐ : Type) (⇐ env ϕ)]]
    -------
-   [⊢ (#%plain-app pi τin- (#%plain-lambda (x-) τout-)) ⇒ Type]])
+   [⊢ (#%plain-app pi (#%plain-app list τin- ...) (#%plain-lambda (x- ...) τout-)) ⇒ Type]])
 
 (begin-for-syntax
   (define pi/internal (expand/df #'pi))
   (define-syntax ~Π
     (pattern-expander
      (syntax-parser
-       [(_ [x:id (~datum :) τin] τout)
+       [(_ [x:id (~datum :) τin] ... τout)
         #:with ty-to-match (generate-temporary)
         #'(~and ty-to-match
                 (~parse
@@ -94,8 +120,22 @@
                          (format "Expected function type, got: ~a"
                                  (type->str #'ty-to-match)
                                  #;(syntax->datum (resugar-type #'ty-to-match)))))
-                  τin
-                  ((~literal #%plain-lambda) (x) τout))
+                  ((~literal #%plain-app) (~literal list) τin ...)
+                  ((~literal #%plain-lambda) (x ...) τout))
+                 #'ty-to-match))]
+       [(_ [x:id (~datum :) τin] ooo:ellipsis τout)
+        #:with ty-to-match (generate-temporary)
+        #'(~and ty-to-match
+                (~parse
+                 ((~literal #%plain-app)
+                  (~and name/internal:id
+                        (~fail
+                         #:unless (free-id=? #'name/internal pi/internal)
+                         (format "Expected function type, got: ~a"
+                                 (type->str #'ty-to-match)
+                                 #;(syntax->datum (resugar-type #'ty-to-match)))))
+                  ((~literal #%plain-app) (~literal list) τin ooo)
+                  ((~literal #%plain-lambda) (x ooo) τout))
                  #'ty-to-match))]))))
 
 
@@ -107,10 +147,12 @@
 (define-typed-syntax Refine
   [(_ [x : τ:base-type] c) ⇐ env ϕ-orig:env/f ≫
    #:with ϕ:env (or (syntax-e #'ϕ-orig) env-empty)
+
    [⊢ τ ≫ τ- (⇐ : Type) (⇐ env ϕ)]
    [[x ≫ x- : τ] ⊢ c ≫ c- (⇐ : Boolean) (⇐ env ϕ)]
+   #:with out #'(#%plain-app refine τ- (#%plain-lambda (x-) c-))
    -------
-   [⊢ (#%plain-app refine τ- (#%plain-lambda (x-) c-)) ⇒ Type]])
+   [⊢ out ⇒ Type]])
 
 (define-syntax Refine/untyped
   (syntax-parser
@@ -126,6 +168,7 @@
        [(_ [x:id (~datum :) τ-base] c)
         #:with ty-to-match (generate-temporary)
         #'(~and ty-to-match
+                ;; (~do (printf "match ~~Refine to ~a~n" #'ty-to-match))
                 (~parse
                  ((~literal #%plain-app)
                   (~and name/internal:id
@@ -174,15 +217,16 @@
       [(~Π [x : τin] τout) #'integer?]
       [(~Refine [x : τ-base] _) (type->lq-pred #'τ-base)]))
 
-  (define env-empty (list))
+  (define env-empty #'())
   (define (env-ext-constr ϕ c)
-    (cons #`(#%constr #,c) ϕ))
+    #`((#%constr #,c) . #,ϕ))
   (define (env-ext ϕ x τ)
     (assert (identifier? x))
-    (define τ- ((current-type-eval) τ))
-    (define predicate (type->lq-pred τ-))
-    (define constraint (lq-constraint x τ-))
-    (cons #`(#,x #,predicate #,constraint) ϕ))
+    (define predicate (type->lq-pred τ))
+    (define constraint (lq-constraint x τ))
+    #`((#,x #,predicate #,constraint) . #,ϕ))
+  (define (env-exts ϕ xs τs)
+    (stx-fold (λ (x τ ϕ-next) (env-ext ϕ-next x τ)) ϕ xs τs))
   (define (env-single x τ)
     (env-ext env-empty x τ)))
 
@@ -366,7 +410,7 @@
   ;; ϕ - a list of syntax object boolean expressions that are assumed to evaluate to true
   ;; c - a syntax object boolean expression that we try to prove evaluates to true
   (define (ple ϕ c)
-    (printf "(ple ~a ~a)~n" (syntax->datum ϕ) (syntax->datum c))
+    #;(printf "(ple ~a ~a)~n" (syntax->datum ϕ) (syntax->datum c))
     (define build1
       (syntax-parser #:datum-literals (#%constr)
                      [(x p c-prem)
@@ -388,7 +432,7 @@
       (define ns (make-empty-namespace))
       (namespace-attach-module (current-namespace) 'rosette/safe ns)
       (namespace-require 'rosette/safe ns)
-      (printf "PROGRAM: ~a~n" (syntax->datum #'program))
+      #;(printf "PROGRAM: ~a~n" (syntax->datum #'program))
       (define solver-result (eval (syntax->datum #'program) ns))
       (printf "EVAL RESULT: ~a~n" solver-result)
       (unsat? solver-result)))
@@ -450,8 +494,8 @@
       [_ (type=? τ1 τ2)]))
   (current-typecheck-relation (λ (τ1 τ2)
                                 (printf "current-typecheck-relation ~a <: ~a ~n" (type->str τ1) (type->str τ2))
-                                #;(<: #'() τ1 τ2)
-                                (error "typecheck relation should not be used"))))
+                                (printf "WARNING: typecheck relation should not be used~n")
+                                (<: env-empty τ1 τ2))))
 
 
 
@@ -469,13 +513,13 @@
    --------
    [⊢ (λ (x-) e-) ⇒ (Π (x- : τin) τout)]])
 
-(define-typerule app
-  [(_ f arg) (⇐ env ϕ:env)  ≫
-   [ ⊢ f ≫ f- (⇒ : (~Π (x : τin) τout)) (⇐ env ϕ) ]
-   [ ⊢ arg ≫ arg- (⇐ : τin) (⇐ env ϕ)]
-   #:with τout- (reflect (subst #'arg- #'x #'τout))
+(define-typerule lsl-app
+  [(_ f arg ...) (⇐ env ϕ:env)  ≫
+   [ ⊢ f ≫ f- (⇒ : (~Π (x : τin) ... τout)) (⇐ env ϕ) ]
+   [ ⊢ arg ≫ arg- (⇐ : τin) (⇐ env ϕ)] ...
+   #:with τout- (reflect (substs #'(arg- ...) #'(x ...) #'τout))
    --------
-   [⊢ (f- arg-) ⇒ τout-]])
+   [⊢ (f- arg- ...) ⇒ τout-]])
 
 
 (begin-for-syntax
@@ -509,12 +553,12 @@
      #'(Refine/untyped [x : τ-base] c)]))
 
 (define-typerule lsl-define #:datum-literals (:)
-  [(_ (f:id [x:id : τin]) : τout e) ⇐ env ϕ:env ≫
-   #:with τ-orig #'(Π (x : τin) τout)
+  [(_ (f:id [x:id (~and xtag :) τin] ...) : τout e) ⇐ env ϕ:env ≫
+   #:with τ-orig #'(Π [x : τin] ... τout)
    ;; TODO could f appear in the type of f as written by the user?
    ;; According to LH paper, yes. I'm not sure how this is useful though.
    [⊢ τ-orig ≫ τ-orig- (⇐ : Type) (⇐ env ϕ)]
-   #:with (~Π (xt- : τin-) τout-) #'τ-orig-
+   #:with (~Π [xt- : τin-] ... τout-) #'τ-orig-
 
    ;; HACK The type of f should be τ, but there is a circular dependency that
    ;; can't easily be handled here so we use τ-orig instead. This is only for checking
@@ -527,13 +571,13 @@
    ;; this rule. So we must manually expand the environment first.
 
    ;; Expand the context Γf, [x ≫ xe- : τin-]
-   #:do [(define Γfx (expand1/bind #'x #': #'τin- Γf))]
-   #:with (f- xe-) (env-xs Γfx)
+   #:do [(define Γfx (expands/bind #'(x ...) #'(xtag ...) #'(τin- ...) Γf))]
+   #:with (f- xe- ...) (env-xs Γfx)
 
    ;; Build constraints for the context no need to add f to ϕ because it is of
    ;; function type
-   #:with ϕ+xe-:env (env-ext #'ϕ #'xe- #'τin-)
-   #:with ϕ+xt-:env (env-ext #'ϕ #'xe- #'τin-)
+   #:with ϕ+xe-:env (env-exts #'ϕ #'(xe- ...) #'(τin- ...))
+   #:with ϕ+xt-:env (env-exts #'ϕ #'(xe- ...) #'(τin- ...))
 
    ;; Now we can expand e [e ≫ e- (⇐ : ($subst x xt- τout-r)) (⇐ env ϕ+xe-)]
    #:with e/exp (add-expected-type (set-env #'e #'ϕ+xe-) #'τout-)
@@ -549,10 +593,10 @@
    ;; REFINEMENT REFLECTION
    ;; NOTE We use e-, not e here, to prevent things from expanding by accident
    ;; later on without an environment
-   #:with τout-r (refine-reflect #'τout- #'($subst xt- x e-) #'ϕ+xt-)
+   #:with τout-r (refine-reflect #'τout- #'($substs (xt- ...) (x ...) e-) #'ϕ+xt-)
    ;; Expand output type
-   #:with τout-r- (expand1 (set-env #'($subst x xt- τout-r) #'ϕ+xt-) Γfx)
-   #:with τ (set-env #'(Π (xt- : τin-) τout-r) #'ϕ)
+   #:with τout-r- (expand1 (set-env #'($substs (x ...) (xt- ...) τout-r) #'ϕ+xt-) Γfx)
+   #:with τ (set-env #'(Π [xt- : τin-] ... τout-r) #'ϕ)
 
    ;; NOTE f must appear in the environment below, because refinement reflection
    ;; will put the body of a recursive function into its type
@@ -562,7 +606,7 @@
 
    --------
    [⊢ (begin (define-typed-variable-rename f ≫ f- : τ-)
-             (define (f- xe-) e-))
+             (define (f- xe- ...) e-))
       (⇒ env ϕ)]]
   [(_ (x:id : τ-orig) e) ⇐ env ϕ:env ≫
    ;; TODO THIS DOES NOT SUPPORT RECURSIVE DEFINITIONS
@@ -579,49 +623,42 @@
       (⇒ env ϕ-new)]])
 
 
+(begin-for-syntax
+  (struct def-info (xs tags τs))
+  (define (get-def-info module-body)
+    (stx-fold (λ (e di)
+                (with-syntax
+                  [((x ...) (def-info-xs di))
+                   ((tag ...) (def-info-tags di))
+                   ((τ ...) (def-info-τs di))]
+                  (syntax-parse e
+                    [def:defn
+                      #:with tag-next #':
+                      (def-info #'(x ... def.name) #'(tag ... tag-next) #'(τ ... def.τ))]
+                    [e di]))) (def-info #'() #'() #'()) module-body)))
 
-(define-syntax lsl-module-begin
-  (syntax-parser
-    [(_ . body)
-     ;; Iterate through each item in the module, building up constraints from
-     ;; the type of each definition adding to the environment, and attaching it
-     ;; to future items
-     #:with (_ body-)
-            (stx-fold (λ (e acc)
-                        (syntax-parse (list e acc)
-                          [(d:defn (ϕ:env (out ...)))
-                           #:with d- (set-env #'d #'ϕ)
-                           #:with next-ϕ:env (env-ext #'ϕ #'d.name (set-env #'d.τ #'ϕ))
-                           #'(next-ϕ (out ... d-))]
-                          [(e (ϕ:env (out ...)))
-                           #:with e- (set-env #'e #'ϕ)
-                           #'(ϕ (out ... e-))]))
-                        #'(() ()) #'body)
-     #'(#%module-begin . body-)]))
 
-#;(define-typerule defns
-  [(_) ≫
-   --------
-   [≻ (begin)]]
-  [(_ d:defn . rst) ⇐ env ϕ:env ≫
-   #:do [(printf "defn ~a: ~a  / ~a~n" (syntax->datum #'d.name) #'d #'ϕ)]
-   [⊢ d ≫ d- ⇐ env ϕ]
-   #:do [(printf "continue: ~a~n" #'d.name)]
-   #:with c (lq-constraint ((current-type-eval) #'d.τ))
-   #:with next-ϕ #'(c . ϕ)
-   #:do [(printf "pre-defns~n")]
-   [⊢ (defns . rst) ≫ rst- ⇐ next-ϕ]
-   #:do [(printf "pre-out~n")]
-   #:with out #'(defns . rst-)
-   #:do [(printf "out: ~a~n" #'out)]
-   --------
-   [⊢ (d- . rst-)]]
-  #;[(_ e . rst) ≫ ⇐ env ϕ:env
-   [⊢ e ≫ e-]
-   --------
-   [⊢ e-]])
 
-(define-for-syntax (join-meet-types τ1 τ2)
+(define-typerule lsl-module-begin
+  [(_ . body) ≫
+   #:do [(define di (get-def-info #'body))]
+   #:with τs (def-info-τs di)
+   #:with ϕ (car (expands/bind+env (def-info-xs di) (def-info-tags di) #'τs env-empty))
+
+   #:with body- (stx-map (λ (b) (set-env b #'ϕ)) #'body)
+   -------
+   [≻ (#%module-begin . body-)]])
+
+
+(define-typerule lsl-let
+  [(_ [(x e) ...] body) (⇐ : τ) (⇐ env ϕ) ≫
+   [⊢ e ≫ e- (⇒ : τx) (⇐ env ϕ)] ...
+   #:with ϕ-next (env-exts #'ϕ #'(x ...) #'(τx ...))
+   [[x ≫ x- : τx] ... ⊢ body ≫ body- (⇐ : τ) (⇐ env ϕ-next)]
+   -------
+   [⊢ (let [(x- e-) ...] body-)]])
+
+(define-for-syntax (meet-base-types τ1 τ2)
   (syntax-parse (list τ1 τ2)
     [(~or (~Real ~Integer)
           (~Integer ~Real)) #'Integer]
@@ -637,7 +674,7 @@
     [_
      #:with τ-base1:base-type (get-base-type τ1)
      #:with τ-base2:base-type (get-base-type τ2)
-     #:with τ-base:base-type (join-base-types #'τ-base1 #'τ-base2)
+     #:with τ-base:base-type (meet-base-types #'τ-base1 #'τ-base2)
      #:with v (generate-temporary 'v)
      #:with c1 (lq-constraint #'v τ1)
      #:with c2 (lq-constraint #'v τ2)
@@ -669,16 +706,53 @@
     [_ #f]))
 
 (define-typerule lsl-if
+  [(_ test e1 e2) (⇐ : τ) (⇐ env ϕ:env) ≫
+   [⊢ test ≫ test- (⇐ Boolean) (⇐ env ϕ)]
+   #:with ϕ1 (env-ext-constr #'ϕ #'test-)
+   [⊢ e1 ≫ e1- (⇐ : τ) (⇐ env ϕ1)]
+   #:with ϕ2 (env-ext-constr #'ϕ #'(not test-))
+   [⊢ e2 ≫ e2- (⇐ : τ) (⇐ env ϕ2)]
+   ------
+   [⊢ (if test- e1- e2-)]]
   [(_ test e1 e2) (⇐ env ϕ:env) ≫
      [⊢ test ≫ test- (⇐ : Boolean) (⇐ env ϕ)]
      #:with ϕ1 (env-ext-constr #'ϕ #'test-)
      [⊢ e1 ≫ e1- (⇒ : τ1) (⇐ env ϕ1)]
      #:with ϕ2 (env-ext-constr #'ϕ #'(not test-))
      [⊢ e2 ≫ e2- (⇒ : τ2) (⇐ env ϕ2)]
+     ;; TODO don't use join-types, but instead a type-level if
      #:with τ (join-types #'τ1 #'τ2)
      #:fail-unless (syntax-e #'τ) (format "types ~a and ~a are not compatible" (type->str #'τ1) (type->str #'τ2))
      -------
      [⊢ (if test- e1- e2-) ⇒ τ]])
+
+(begin-for-syntax
+  (define old-type-eval (current-type-eval))
+  (current-type-eval
+   (λ (τ [Γ (mk-new-env)])
+     (expand1 τ Γ))))
+
+(define-typerule lsl-:
+  [(_ e τ) (⇐ env ϕ) ≫
+           [⊢ τ ≫ τ- (⇐ : Type) (⇐ env ϕ)]
+           [⊢ e ≫ e- (⇐ : τ-) (⇐ env ϕ)]
+           -------
+           [⊢ e- ⇒ τ-]])
+
+(define-typerule lsl-error
+  [(_ msg:string) (⇐ : τ) (⇐ env ϕ)≫
+   #:fail-unless (ple #'ϕ #'#f) (syntax-e #'msg)
+   -------
+   [⊢ (error (#%datum . msg))]])
+
+(define-typerule lsl-cond
+  [(_ [test body] . rst) (⇐ : τ) (⇐ env ϕ) ≫
+   ;; [⊢ test ≫ test- (⇐ : Boolean) (⇐ env ϕ)]
+   -------
+   [⊢ (lsl-if test body (lsl-cond . rst))]]
+  [(_) (⇐ : τ) (⇐ env ϕ) ≫
+   -------
+   [⊢ (lsl-error "Cond: non-exhaustive pattern matching")]])
 
 #;(define-typerule define-struct #:datum-literals (:)
   [(_ user-type-name [(field : τ_f) ...]) ≫
