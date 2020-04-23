@@ -109,7 +109,7 @@
   (define-syntax ~Π
     (pattern-expander
      (syntax-parser
-       [(_ [x:id (~datum :) τin] ... τout)
+       #;[(_ [x:id (~datum :) τin] ... τout)
         #:with ty-to-match (generate-temporary)
         #'(~and ty-to-match
                 (~parse
@@ -145,20 +145,22 @@
 ;; I'm not sure if this is still necessary
 (struct refine (τ c))
 (define-typed-syntax Refine
-  [(_ [x : τ:base-type] c) ⇐ env ϕ-orig:env/f ≫
-   #:with ϕ:env (or (syntax-e #'ϕ-orig) env-empty)
+  [(_ [x : τ:base-type] c) ⇐ env ϕ:env ≫
 
    [⊢ τ ≫ τ- (⇐ : Type) (⇐ env ϕ)]
-   [[x ≫ x- : τ] ⊢ c ≫ c- (⇐ : Boolean) (⇐ env ϕ)]
+   [[x ≫ x- : τ-] ⊢ c ≫ c- (⇐ : Boolean) (⇐ env ϕ)]
    #:with out #'(#%plain-app refine τ- (#%plain-lambda (x-) c-))
    -------
    [⊢ out ⇒ Type]])
 
-(define-syntax Refine/untyped
-  (syntax-parser
-    [(_ [x:identifier : τ:base-type] c)
-     #:with out (assign-type #'(#%plain-app refine τ (#%plain-lambda (x) c)) #'Type)
-     #'out]))
+(define-typerule Refine/untyped
+  [(_ [x : τ:base-type] c) ⇐ env ϕ-orig:env/f ≫
+     #:with ϕ:env (or (syntax-e #'ϕ-orig) env-empty)
+     [⊢ τ ≫ τ- (⇐ : Type) (⇐ env ϕ)]
+     [[x ≫ x- : τ-] ⊢ c ≫ c- ⇐ env ϕ]
+     #:with out #'(#%plain-app refine τ- (#%plain-lambda (x-) c-))
+     -------
+     [⊢ out ⇒ Type]])
 
 (begin-for-syntax
   (define refine/internal (expand/df #'refine))
@@ -168,7 +170,6 @@
        [(_ [x:id (~datum :) τ-base] c)
         #:with ty-to-match (generate-temporary)
         #'(~and ty-to-match
-                ;; (~do (printf "match ~~Refine to ~a~n" #'ty-to-match))
                 (~parse
                  ((~literal #%plain-app)
                   (~and name/internal:id
@@ -197,13 +198,15 @@
     (syntax-parse τ
       [(~or ~Integer ~Real ~Boolean ~String ~Char)
        #:with p (type->lq-pred τ)
-       #'p]
+       #`(p #,x)]
       [~Unit #`(equal? #,x #t)]
       [(~Refine (v : τ-base) c)
        #:with p (type->lq-pred τ)
        #:with c-base (lq-constraint x #'τ-base)
-       #`(and c-base (p #,x) ($subst #,x v c))]
-      [_ #'#t]))
+       #:with constr #`($subst #,x v c)
+       #`(and c-base (p #,x) constr)]
+      [(~Π [_ : _] ... _) #'#t]
+      [_ (error "unknown type ~a" 'lq-constraint (type->str τ))]))
 
   (define type->lq-pred
     (syntax-parser
@@ -214,7 +217,7 @@
       [~String  #'string?]
       [~Char    #'char?]
       #;[(_ ~SExp)    ???]
-      [(~Π [x : τin] τout) #'integer?]
+      [(~Π [x : τin] ... τout) #'integer?]
       [(~Refine [x : τ-base] _) (type->lq-pred #'τ-base)]))
 
   (define env-empty #'())
@@ -236,8 +239,8 @@
   [_ ≫
    #:with out #'#t
    #:with x (generate-temporary)
-   #:with c (assign-type #'(equal? x out) #'Boolean)
-   #:with τ #'(Refine (x : Unit) c)
+   #:with c #'(equal? x out)
+   #:with τ #'(Refine/untyped (x : Unit) c)
    -------
    [⊢ out ⇒ τ]])
 
@@ -247,7 +250,7 @@
    #:with out #'(+ e- ...)
    #:with x (generate-temporary)
    #:with c (assign-type #'(equal? x out) #'Boolean)
-   #:with τ #'(Refine (x : Real) c)
+   #:with τ #'(Refine/untyped (x : Real) c)
    --------
    [⊢ out ⇒ τ]])
 
@@ -387,7 +390,8 @@
   (attach e 'env ϕ))
 (define-for-syntax (prim-type v)
   (with-syntax [[τ-base (prim-base-type v)]
-                [lit #`(quote #,v) #;(assign-type #`(#%datum- #,v) τ-base)]]
+                [lit #`(quote #,v) #;(assign-type #`(#%datum- #,v) τ-base)]
+                [x (generate-temporary 'v)]]
     (assign-type #'(Refine/untyped (x : τ-base) (equal? x lit)) #'Type)))
 
 (define-typed-syntax lsl-datum
@@ -398,7 +402,6 @@
    [⊢ (#%datum- . v) ⇒ τ]]
   [(_ . x) ⇐ env ϕ ≫
            #:with _:env #'ϕ
-   #:do [(printf "bad datum~n")]
    --------
    [#:error (type-error #:src #'x
                         #:msg "Unsupported literal: ~v" #'x)]])
@@ -410,7 +413,7 @@
   ;; ϕ - a list of syntax object boolean expressions that are assumed to evaluate to true
   ;; c - a syntax object boolean expression that we try to prove evaluates to true
   (define (ple ϕ c)
-    #;(printf "(ple ~a ~a)~n" (syntax->datum ϕ) (syntax->datum c))
+    (printf "(ple ~a ~a)~n" (syntax->datum ϕ) (syntax->datum c))
     (define build1
       (syntax-parser #:datum-literals (#%constr)
                      [(x p c-prem)
@@ -432,7 +435,7 @@
       (define ns (make-empty-namespace))
       (namespace-attach-module (current-namespace) 'rosette/safe ns)
       (namespace-require 'rosette/safe ns)
-      #;(printf "PROGRAM: ~a~n" (syntax->datum #'program))
+      (printf "PROGRAM: ~a~n" (syntax->datum #'program))
       (define solver-result (eval (syntax->datum #'program) ns))
       (printf "EVAL RESULT: ~a~n" solver-result)
       (unsat? solver-result)))
@@ -442,7 +445,8 @@
   (define (strengthen-exact τ e)
     (syntax-parse ((current-type-eval) τ)
       [(~Refine (v : τ-base) c)
-       #`(Refine/untyped (v : τ-base) (and c (equal? v #,e)))]
+       #:with out #`(Refine/untyped (v : τ-base) (and c (equal? v #,e)))
+       #'out]
       [τ-base:base-type
        #`(Refine/untyped (v : τ-base) (equal? v #,e))]
       [_ τ]))
@@ -471,10 +475,10 @@
     (define τ1- ((current-type-eval) τ1))
     (define τ2- ((current-type-eval) τ2))
     (syntax-parse (list τ1- τ2-)
-      [((~Π (x1 : τ-in1) τ-out1) (~Π (x2 : τ-in2) τ-out2))
-       (and (<: ϕ #'τ-in2  #'τ-in1)
-            (<: (env-ext ϕ #'x2 #'τ-in2)
-                (subst #'x2 #'x1 #'τ-out1) #'τ-out2))]
+      [((~Π (x1 : τ-in1) ... τ-out1) (~Π (x2 : τ-in2) ... τ-out2))
+       (and (andmap (λ (τ-in1 τ-in2) (<: ϕ τ-in2  τ-in1)) #'(τ-in1 ...) #'(τ-in2 ...))
+            (<: (env-exts ϕ #'(x2 ...) #'(τ-in2 ...))
+                (substs #'(x2 ...) #'(x1 ...) #'τ-out1) #'τ-out2))]
       [(_ (~Refine (x2 : τ-base2) c2))
        ;; #:do [(printf "Subtype: ~a <: ~a~n" (type->str τ1) (type->str τ2))]
        #:with τ-base1:base-type (get-base-type τ1-)
@@ -515,9 +519,9 @@
 
 (define-typerule lsl-app
   [(_ f arg ...) (⇐ env ϕ:env)  ≫
-   [ ⊢ f ≫ f- (⇒ : (~Π (x : τin) ... τout)) (⇐ env ϕ) ]
-   [ ⊢ arg ≫ arg- (⇐ : τin) (⇐ env ϕ)] ...
-   #:with τout- (reflect (substs #'(arg- ...) #'(x ...) #'τout))
+   [⊢ f ≫ f- (⇒ : (~and ftype (~Π (x : τin) ... τout))) (⇐ env ϕ) ]
+   [⊢ arg ≫ arg- (⇐ : τin) (⇐ env ϕ)] ...
+   #:with τout- (substs #'(arg- ...) #'(x ...) #'τout)
    --------
    [⊢ (f- arg- ...) ⇒ τout-]])
 
@@ -538,19 +542,22 @@
 
 (define-for-syntax (refine-reflect τ e ϕ)
   (syntax-parse τ
-    [(~Refine [x : τ-base] c)
+    [(~Refine [x:identifier : τ-base] c)
      #:with e+ϕ (set-env e ϕ)
-     #`(Refine/untyped [x : τ-base] (and c (equal? x e+ϕ)))]
-    [(~Π [x : τin] τout)
-     #:with x- (fresh 'x)
+     #:with c-next #'(and c (equal? x e+ϕ))
+     #:with out #'(Refine/untyped [x : τ-base] c-next)
+     #'out]
+    [(~Π [x : τin] ... τout)
+     #:with (x- ...) (generate-temporaries '(x ...))
      #:with e+ϕ (set-env e ϕ)
-     #:with τout- (refine-reflect #'τ-out #'(e+ϕ x-))
-     #'(Π [x- : τ-in] τr)]
+     #:with τout- (refine-reflect #'τ-out #'(e+ϕ x- ...)) ;; TODO CHECK THIS!!!!
+     #'(Π [x- : τ-in] ... τr)]
     [τ-base:base-type
      #:with x (generate-temporary 'v)
      #:with e+ϕ (set-env e ϕ)
-     #:with c (assign-type #'(equal? x e+ϕ) #'Boolean)
-     #'(Refine/untyped [x : τ-base] c)]))
+     #:with c #'(equal? x e+ϕ)
+     #:with out #'(Refine/untyped [x : τ-base] c)
+     #'out]))
 
 (define-typerule lsl-define #:datum-literals (:)
   [(_ (f:id [x:id (~and xtag :) τin] ...) : τout e) ⇐ env ϕ:env ≫
@@ -594,15 +601,17 @@
    ;; NOTE We use e-, not e here, to prevent things from expanding by accident
    ;; later on without an environment
    #:with τout-r (refine-reflect #'τout- #'($substs (xt- ...) (x ...) e-) #'ϕ+xt-)
+
    ;; Expand output type
    #:with τout-r- (expand1 (set-env #'($substs (x ...) (xt- ...) τout-r) #'ϕ+xt-) Γfx)
-   #:with τ (set-env #'(Π [xt- : τin-] ... τout-r) #'ϕ)
+   #:with τ (set-env #'(Π [xe- : τin-] ... τout-r-) #'ϕ)
 
    ;; NOTE f must appear in the environment below, because refinement reflection
    ;; will put the body of a recursive function into its type
    ;; [ Γf ⊢ τ ≫ τ- (⇐ : Type) (⇐ env ϕ)]
    #:with τ- (expand1 (set-env #'τ #'ϕ) Γf)
    ;; TODO check τ- has type Type?
+
 
    --------
    [⊢ (begin (define-typed-variable-rename f ≫ f- : τ-)
@@ -653,8 +662,10 @@
 (define-typerule lsl-let
   [(_ [(x e) ...] body) (⇐ : τ) (⇐ env ϕ) ≫
    [⊢ e ≫ e- (⇒ : τx) (⇐ env ϕ)] ...
-   #:with ϕ-next (env-exts #'ϕ #'(x ...) #'(τx ...))
-   [[x ≫ x- : τx] ... ⊢ body ≫ body- (⇐ : τ) (⇐ env ϕ-next)]
+   #:with (τx+ ...) (stx-map strengthen-exact #'(τx ...) #'(e- ...))
+   [⊢ τx+ ≫ τx- (⇐ : Type) (⇐ env ϕ)] ...
+   #:with ϕ-next (env-exts #'ϕ #'(x ...) #'(τx- ...))
+   [[x ≫ x- : τx-] ... ⊢ body ≫ body- (⇐ : τ) (⇐ env ϕ-next)]
    -------
    [⊢ (let [(x- e-) ...] body-)]])
 
@@ -665,12 +676,12 @@
     [_ (if (type=? τ1 τ2) τ1 #f)]))
 (define-for-syntax (meet-types τ1 τ2)
   (syntax-parse (list τ1 τ2)
-    [((~Π (x1 : τin1) τout1) (~Π (x2 : τin2) τout2))
-     #:with x #'x1
-     #:with τin (join-types #'τin1 #'τin2)
-     #:with τout (meet-types #'($subst x x1 τout1) #'($subst x x2 τout2))
-     #:when (and #'τin #'τout)
-     #'(Π (x : τin) τout)]
+    [((~Π (x1 : τin1) ... τout1) (~Π (x2 : τin2) ... τout2))
+     #:with (x ...) #'(x1 ...)
+     #:with (τin ...) (stx-map join-types #'(τin1 ...) #'(τin2 ...))
+     #:with τout (meet-types #'($substs (x ...) (x1 ...) τout1) #'($substs (x ...) (x2 ...) τout2))
+     #:when (and (andmap syntax-e #'(τin ...)) #'τout)
+     #'(Π (x : τin) ... τout)]
     [_
      #:with τ-base1:base-type (get-base-type τ1)
      #:with τ-base2:base-type (get-base-type τ2)
@@ -688,12 +699,13 @@
     [_ (if (type=? τ1 τ2) τ1 #f)]))
 (define-for-syntax (join-types τ1 τ2)
   (syntax-parse (list τ1 τ2)
-    [((~Π (x1 : τin1) τout1) (~Π (x2 : τin2) τout2))
-     #:with x #'x1
-     #:with τin (meet-types #'τin1 #'τin2)
-     #:with τout (join-types #'($subst x x1 τout1) #'($subst x x2 τout2))
-     #:when (and #'τin #'τout)
-     #'(Π (x : τin) τout)]
+    [((~Π (x1 : τin1) ... τout1) (~Π (x2 : τin2) ... τout2))
+     #:with (x ...) #'(x1 ...)
+     #:with τin (stx-map meet-types #'(τin1 ...) #'(τin2 ...))
+     #:with τout (join-types #'($subst (x ...) (x1 ...) τout1)
+                             #'($subst (x ...) (x2 ...) τout2))
+     #:when (and #'(andmap syntax-e τin) #'τout)
+     #'(Π (x : τin) ... τout)]
     [_
      #:with τ-base1 (get-base-type τ1)
      #:with τ-base2 (get-base-type τ2)
